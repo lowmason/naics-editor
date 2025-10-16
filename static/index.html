@@ -128,13 +128,17 @@
                 return;
             }
 
-            const cards = data.map(item => `
+            const cards = data.map(item => {
+                // BUG FIX: Escape single quotes in the stringified JSON data to prevent breaking the HTML attribute.
+                const stringifiedData = JSON.stringify(item).replace(/'/g, '&#39;');
+
+                return `
                 <div class='bg-white p-4 rounded-lg shadow-sm border border-gray-200'>
                     <!-- Header -->
                     <div class='flex flex-wrap items-baseline mb-3 pb-2 border-b'>
                         <span class='bg-blue-100 text-blue-800 text-xs font-semibold mr-2 px-2.5 py-0.5 rounded'>Lvl: ${item.level || 'N/A'}</span>
                         <span class='bg-gray-100 text-gray-800 text-xs font-semibold mr-2 px-2.5 py-0.5 rounded'>Code: ${item.code || 'N/A'}</span>
-                        <h2 class='text-lg font-bold text-gray-900 flex-1 min-w-0 clickable-edit' data-field='title' data-original-data='${JSON.stringify(item)}'>
+                        <h2 class='text-lg font-bold text-gray-900 flex-1 min-w-0 clickable-edit' data-field='title' data-original-data='${stringifiedData}'>
                             ${createContentHtml(item.title, '[Click to add title...]')}
                         </h2>
                     </div>
@@ -142,25 +146,25 @@
                     <div class='space-y-3'>
                         <div>
                             <label class='text-sm font-medium text-gray-600'>Description</label>
-                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='description' data-original-data='${JSON.stringify(item)}'>
+                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='description' data-original-data='${stringifiedData}'>
                                 ${createContentHtml(item.description, '[Click to add description...]')}
                             </p>
                         </div>
                         <div>
                             <label class='text-sm font-medium text-gray-600'>Examples</label>
-                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='examples' data-original-data='${JSON.stringify(item)}'>
+                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='examples' data-original-data='${stringifiedData}'>
                                 ${createContentHtml(item.examples, '[Click to add examples...]')}
                             </p>
                         </div>
                         <div>
                             <label class='text-sm font-medium text-gray-600'>Excluded</label>
-                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='excluded' data-original-data='${JSON.stringify(item)}'>
+                            <p class='mt-1 text-gray-700 text-sm clickable-edit' data-field='excluded' data-original-data='${stringifiedData}'>
                                 ${createContentHtml(item.excluded, '[Click to add excluded items...]')}
                             </p>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
 
             dataContainer.innerHTML = cards;
         }
