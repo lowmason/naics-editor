@@ -247,12 +247,11 @@
         async function saveData(element, newValue) {
             const originalData = JSON.parse(element.dataset.originalData);
             const field = element.dataset.field;
-
-            // Create the updated data object
             const updatedData = { ...originalData, [field]: newValue };
-            
-            // The unique index for the API endpoint
             const index = originalData.index;
+
+            // Define card here to be accessible in both try and catch blocks
+            const card = element.closest('.bg-white');
 
             try {
                 const response = await fetch(`/api/data/${index}`, {
@@ -265,26 +264,32 @@
                     throw new Error(`Failed to save data. Server responded with ${response.status}`);
                 }
                 
-                // Update the original-data attribute with the newly saved data
-                element.dataset.originalData = JSON.stringify(updatedData);
+                // BUG FIX: Update all fields on the card to maintain data consistency.
+                if (card) {
+                    card.querySelectorAll('.clickable-edit').forEach(el => {
+                        el.dataset.originalData = JSON.stringify(updatedData);
+                    });
+                }
 
                 console.log(`Successfully updated index ${index}`);
                 // Visual feedback for success
-                const card = element.closest('.bg-white');
-                card.style.transition = 'background-color 0.5s';
-                card.style.backgroundColor = '#e0f2fe'; // light-blue
-                setTimeout(() => {
-                   card.style.backgroundColor = 'white';
-                }, 1500);
+                if (card) {
+                    card.style.transition = 'background-color 0.5s';
+                    card.style.backgroundColor = '#e0f2fe'; // light-blue
+                    setTimeout(() => {
+                       card.style.backgroundColor = 'white';
+                    }, 1500);
+                }
 
             } catch (error) {
                 console.error('Error saving data:', error);
                 // Visual feedback for error
-                const card = element.closest('.bg-white');
-                card.style.backgroundColor = '#fee2e2'; // light-red
-                 setTimeout(() => {
-                   card.style.backgroundColor = 'white';
-                }, 2000);
+                if (card) {
+                    card.style.backgroundColor = '#fee2e2'; // light-red
+                    setTimeout(() => {
+                       card.style.backgroundColor = 'white';
+                    }, 2000);
+                }
             }
         }
 
