@@ -1,0 +1,11 @@
+# Dependencies
+.venv/
+.ruff_cache/
+__pycache__/
+
+# Environment variables
+uv.lock
+
+# OS files
+.DS_Store
+Thumbs.db

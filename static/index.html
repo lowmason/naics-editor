@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive NAICS Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for a better text area experience */
+        .editable-textarea {
+            width: 100%;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid #d1d5db; /* gray-300 */
+            transition: border-color 0.2s, box-shadow 0.2s;
+            resize: vertical; /* Allow vertical resizing */
+        }
+        .editable-textarea:focus {
+            outline: none;
+            border-color: #3b82f6; /* blue-500 */
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-6 flex flex-col sm:flex-row justify-between items-center">
+            <h1 class="text-3xl font-bold text-gray-800 mb-4 sm:mb-0">NAICS Data Editor</h1>
+             <button id="shutdown-btn" class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-transform transform hover:scale-105">
+                Shutdown Server
+            </button>
+        </header>
+
+        <!-- Controls -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 p-4 bg-white rounded-lg shadow">
+            <input type="number" id="level-filter" placeholder="Filter by Level (e.g., 2)" class="p-2 border rounded-md">
+            <input type="text" id="code-filter" placeholder="Filter by Code (e.g., 31)" class="p-2 border rounded-md">
+            <input type="text" id="search-input" placeholder="Search (regex supported)..." class="p-2 border rounded-md md:col-span-1">
+        </div>
+        
+        <!-- Data Display -->
+        <div id="data-container" class="space-y-4">
+            <!-- Data cards will be injected here -->
+        </div>
+
+         <!-- Loading Spinner -->
+        <div id="loading" class="text-center py-10 hidden">
+            <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="mt-2 text-gray-600">Loading data...</p>
+        </div>
+    </div>
+
+    <script>
+        const levelFilter = document.getElementById('level-filter');
+        const codeFilter = document.getElementById('code-filter');
+        const searchInput = document.getElementById('search-input');
+        const dataContainer = document.getElementById('data-container');
+        const loadingIndicator = document.getElementById('loading');
+        const shutdownBtn = document.getElementById('shutdown-btn');
+
+        let debounceTimer;
+
+        // Fetch and display data from the backend
+        async function fetchData() {
+            loadingIndicator.classList.remove('hidden');
+            dataContainer.innerHTML = ''; // Clear previous results
+
+            const level = levelFilter.value;
+            const code = codeFilter.value;
+            const search = searchInput.value;
+            
+            const params = new URLSearchParams();
+            if (level) params.append('level', level);
+            if (code) params.append('code', code);
+            if (search) params.append('search', search);
+
+            try {
+                const response = await fetch(`/api/data?${params.toString()}`);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const data = await response.json();
+                displayData(data);
+            } catch (error) {
+                console.error("Failed to fetch data:", error);
+                dataContainer.innerHTML = `<p class="text-red-500 text-center">Failed to load data. Please check the console for errors.</p>`;
+            } finally {
+                loadingIndicator.classList.add('hidden');
+            }
+        }
+
+        // Display data in cards
+        function displayData(data) {
+            if (!data || data.length === 0) {
+                dataContainer.innerHTML = `<p class="text-gray-500 text-center">No results found.</p>`;
+                return;
+            }
+
+            const cards = data.map(item => `
+                <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
+                    <!-- Header -->
+                    <div class="flex flex-wrap items-baseline mb-3 pb-2 border-b">
+                        <span class="bg-blue-100 text-blue-800 text-xs font-semibold mr-2 px-2.5 py-0.5 rounded">Lvl: ${item.level || 'N/A'}</span>
+                        <span class="bg-gray-100 text-gray-800 text-xs font-semibold mr-2 px-2.5 py-0.5 rounded">Code: ${item.code || 'N/A'}</span>
+                        <h2 class="text-lg font-bold text-gray-900 flex-1 min-w-0" data-field="title" data-original-data='${JSON.stringify(item)}'>${item.title || ''}</h2>
+                    </div>
+                    <!-- Body -->
+                    <div class="space-y-3">
+                        <div>
+                            <label class="text-sm font-medium text-gray-600">Description</label>
+                            <p class="mt-1 text-gray-700 text-sm" data-field="description" data-original-data='${JSON.stringify(item)}'>${item.description || ''}</p>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-600">Examples</label>
+                            <p class="mt-1 text-gray-700 text-sm" data-field="examples" data-original-data='${JSON.stringify(item)}'>${item.examples || ''}</p>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-600">Excluded</label>
+                            <p class="mt-1 text-gray-700 text-sm" data-field="excluded" data-original-data='${JSON.stringify(item)}'>${item.excluded || ''}</p>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+
+            dataContainer.innerHTML = cards;
+        }
+
+        // --- Event Listeners ---
+
+        // Debounced input for filters
+        [levelFilter, codeFilter, searchInput].forEach(input => {
+            input.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(fetchData, 300); // Wait 300ms after user stops typing
+            });
+        });
+
+        // Event delegation for making content editable
+        dataContainer.addEventListener('click', (event) => {
+            const target = event.target;
+            const field = target.dataset.field;
+
+            // Ensure we are clicking an editable field and not already in edit mode
+            if (field && !target.isContentEditable) {
+                makeEditable(target);
+            }
+        });
+        
+        // --- Shutdown Logic ---
+        shutdownBtn.addEventListener('click', async () => {
+            if (confirm('Are you sure you want to shut down the server? This will stop the application.')) {
+                try {
+                    await fetch('/api/shutdown', { method: 'POST' });
+                    document.body.innerHTML = `
+                        <div class="h-screen flex items-center justify-center">
+                             <div class="text-center">
+                                 <h1 class="text-2xl font-bold text-gray-800">Server has been shut down.</h1>
+                                 <p class="text-gray-600">You can now safely close this browser tab.</p>
+                             </div>
+                        </div>`;
+                } catch (error) {
+                    // This error may occur if the server shuts down before sending a response
+                    console.warn("Server shut down before response could be received. This is expected.", error);
+                    document.body.innerHTML = `
+                        <div class="h-screen flex items-center justify-center">
+                             <div class="text-center">
+                                 <h1 class="text-2xl font-bold text-gray-800">Server has been shut down.</h1>
+                                 <p class="text-gray-600">You can now safely close this browser tab.</p>
+                             </div>
+                        </div>`;
+                }
+            }
+        });
+
+
+        // --- Editing Logic ---
+
+        function makeEditable(element) {
+            const isTitle = element.tagName === 'H2';
+            const originalContent = element.textContent;
+
+            const editor = document.createElement(isTitle ? 'input' : 'textarea');
+            if (isTitle) {
+                editor.type = 'text';
+                editor.className = 'text-lg font-bold text-gray-900 w-full p-1 border rounded';
+            } else {
+                editor.className = 'editable-textarea';
+                editor.rows = Math.max(5, (originalContent.length / 80)); // Adjust rows based on content length
+            }
+            editor.value = originalContent;
+
+            element.replaceWith(editor);
+            editor.focus();
+
+            // When the editor loses focus, save the changes
+            editor.addEventListener('blur', () => {
+                const newContent = editor.value;
+                element.textContent = newContent; // Put text back into original element
+                editor.replaceWith(element); // Put original element back
+                
+                if (newContent.trim() !== originalContent.trim()) {
+                    saveData(element, newContent);
+                }
+            });
+        }
+
+        async function saveData(element, newValue) {
+            const originalData = JSON.parse(element.dataset.originalData);
+            const field = element.dataset.field;
+
+            // Create the updated data object
+            const updatedData = { ...originalData, [field]: newValue };
+            
+            // The unique index for the API endpoint
+            const index = originalData.index;
+
+            try {
+                const response = await fetch(`/api/data/${index}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updatedData)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to save data. Server responded with ${response.status}`);
+                }
+                
+                console.log(`Successfully updated index ${index}`);
+                // Optional: visual feedback for success
+                element.closest('.bg-white').style.transition = 'background-color 0.5s';
+                element.closest('.bg-white').style.backgroundColor = '#e0f2fe'; // light-blue
+                setTimeout(() => {
+                   element.closest('.bg-white').style.backgroundColor = 'white';
+                }, 1500);
+
+            } catch (error) {
+                console.error('Error saving data:', error);
+                // Optional: visual feedback for error
+                element.closest('.bg-white').style.backgroundColor = '#fee2e2'; // light-red
+                 setTimeout(() => {
+                   element.closest('.bg-white').style.backgroundColor = 'white';
+                }, 2000);
+            }
+        }
+
+        // Initial data load
+        fetchData();
+    </script>
+</body>
+</html>
+
