@@ -1,153 +1,211 @@
 # -------------------------------------------------------------------------------------------------
-# Imports 
+# Imports
 # -------------------------------------------------------------------------------------------------
 
-import duckdb
 import os
 import signal
-from fastapi import FastAPI, HTTPException, Path
-from fastapi.responses import HTMLResponse
+import threading
+from contextlib import closing
+
+import duckdb
+import pandas as pd
+import uvicorn
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import Optional
-
 
 # -------------------------------------------------------------------------------------------------
-# Pydantic model for data validation
+# Globals
 # -------------------------------------------------------------------------------------------------
 
-class Item(BaseModel):
+# Use a lock for database operations to ensure thread safety
+db_lock = threading.Lock()
+DB_FILE = 'naics_data.db'
+# Use a threading Event to signal shutdown across the application
+SHUTDOWN_EVENT = threading.Event()
+
+# -------------------------------------------------------------------------------------------------
+# Pydantic Models for Data Validation
+# -------------------------------------------------------------------------------------------------
+
+class NaicsEntry(BaseModel):
+    '''Represents a single NAICS entry for API responses.'''
     index: int
-    level: Optional[int] = None
-    code: Optional[str] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    excluded: Optional[str] = Field(None, alias='excluded')
-    examples: Optional[str] = Field(None, alias='examples')
+    level: int | None = None
+    code: str | None = None
+    title: str | None = None
+    description: str | None = None
+    excluded: str | None = None
+    examples: str | None = None
 
-    class Config:
-        populate_by_name = True # Allows using alias
-        
+class NaicsUpdate(BaseModel):
+    '''Represents the data structure for updating a NAICS entry.'''
+    level: int | None = Field(None)
+    code: str | None = Field(None)
+    title: str | None = Field(None)
+    description: str | None = Field(None)
+    excluded: str | None = Field(None)
+    examples: str | None = Field(None)
+
+# -------------------------------------------------------------------------------------------------
+# FastAPI App Initialization
+# -------------------------------------------------------------------------------------------------
+
 app = FastAPI()
 
-
 # -------------------------------------------------------------------------------------------------
-# Connect to a file-based DuckDB database for persistence.
+# Database Setup
 # -------------------------------------------------------------------------------------------------
-
-con = duckdb.connect(database='naics.duckdb', read_only=False)
 
 @app.on_event('startup')
 def startup_event():
-
     '''
-    On startup, checks if the 'naics' table exists. If not, it loads the
-    initial data from the 'naics_descriptions.parquet' file.
+    Initialize the database on application startup.
+    Checks if the database file exists. If not, it creates the table and
+    loads the initial data from the 'naics_descriptions.parquet' file.
     '''
+    db_file_exists = os.path.exists(DB_FILE)
+    with db_lock:
+        with closing(duckdb.connect(DB_FILE)) as con:
+            print(f'Connected to database: {DB_FILE}')
 
-    tables = con.execute('SHOW TABLES').fetchall()
+            if not db_file_exists:
+                print('Database file not found. Creating and populating table...')
+                try:
+                    con.execute('''
+                        CREATE TABLE naics (
+                            index UBIGINT PRIMARY KEY,
+                            level UTINYINT,
+                            code VARCHAR,
+                            title VARCHAR,
+                            description VARCHAR,
+                            excluded VARCHAR,
+                            examples VARCHAR
+                        );
+                    ''')
+                    parquet_file = 'naics_descriptions.parquet'
+                    if os.path.exists(parquet_file):
+                        df = pd.read_parquet(parquet_file)
+                        con.register('df_view', df)
+                        con.execute('INSERT INTO naics SELECT * FROM df_view')
+                        print(f'Successfully loaded {len(df)} rows from {parquet_file}.')
+                    else:
+                        print(f"Warning: '{parquet_file}' not found. Database will be empty.")
+                except Exception as e:
+                    print(f'Error during initial database setup: {e}')
+                    os.remove(DB_FILE)
+            else:
+                print('Existing database file found. Skipping data load.')
 
-    if ('naics',) not in tables:
-        print("Table 'naics' not found. Loading initial data from parquet file...")
-        try:
-            con.execute("CREATE TABLE naics AS SELECT * FROM read_parquet('naics_descriptions.parquet');")
-            print("Successfully created 'naics' table and loaded data.")
-        except Exception as e:
-            print(f'Error loading Parquet file: {e}')
-            # Handle case where file might not be found
-    else:
-        print("Table 'naics' already exists. Skipping initial data load.")
-
+@app.on_event('shutdown')
+def shutdown_event():
+    '''Placeholder for any cleanup on shutdown.'''
+    print('FastAPI application is shutting down.')
 
 # -------------------------------------------------------------------------------------------------
 # API Endpoints
 # -------------------------------------------------------------------------------------------------
 
-@app.get('/api/data')
-def get_data(level: Optional[int] = None, code: Optional[str] = None, search: Optional[str] = None):
-    
+@app.get('/api/data', response_model=list[NaicsEntry])
+def get_data(level: int = None, code: str = None, search: str = None):
     '''
-    Fetches and filters data from the NAICS table.
-    Supports filtering by level, code, and a regex search term.
+    Fetches and filters NAICS data from the database.
+    Supports filtering by level, code prefix, and a full-text search term.
     '''
-    
-    query = 'SELECT * FROM naics'
-    filters = []
+    query_parts = []
     params = []
 
     if level is not None:
-        filters.append('level = ?')
+        query_parts.append('level = ?')
         params.append(level)
     if code:
-        filters.append('code LIKE ?')
-        params.append(f'%{code}%')
+        query_parts.append("code LIKE ?")
+        params.append(f'{code}%')
     if search:
-        # Regex search across multiple text fields
-        search_clause = 'regexp_matches(title, ?) OR regexp_matches(description, ?) OR regexp_matches(examples, ?) OR regexp_matches(excluded, ?)'
-        filters.append(f'({search_clause})')
-        # Add the search parameter four times, once for each field
+        search_condition = '''
+            (regexp_matches(title, ?) OR
+             regexp_matches(description, ?) OR
+             regexp_matches(examples, ?) OR
+             regexp_matches(excluded, ?))
+        '''
+        query_parts.append(search_condition)
         params.extend([search] * 4)
 
-    if filters:
-        query += ' WHERE ' + ' AND '.join(filters)
+    if not query_parts:
+        return []
 
-    query += ' ORDER BY index'
-    
-    results = con.execute(query, params).fetchdf()
-    
-    return results.to_dict('records')
+    base_query = 'SELECT * FROM naics WHERE ' + ' AND '.join(query_parts) + ' LIMIT 100'
 
-@app.put('/api/data/{index}')
-async def update_item(item: Item, index: int = Path(..., title='The index of the item to update')):
-    '''
-    Updates an existing item in the database based on its index.
-    '''
-    if item.index != index:
-        raise HTTPException(status_code=400, detail='Path index and item index do not match.')
-    
     try:
-        # Prepare the UPDATE statement
-        con.execute(
-            '''
-            UPDATE naics 
-            SET title = ?, description = ?, examples = ?, excluded = ?
-            WHERE index = ?
-            ''',
-            [item.title, item.description, item.examples, item.excluded, index]
-        )
-        return {'status': 'success', 'message': f'Item {index} updated.'}
+        with db_lock:
+            with closing(duckdb.connect(DB_FILE, read_only=True)) as con:
+                results = con.execute(base_query, params).fetchdf()
+        return results.to_dict('records')
+    except duckdb.Error as e:
+        raise HTTPException(status_code=500, detail=f'Database query failed: {e}')
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f'Database error: {str(e)}')
+        raise HTTPException(status_code=500, detail=f'An unexpected error occurred: {e}')
 
+@app.put('/api/data/{item_index}', status_code=204)
+def update_data(item_index: int, item: NaicsUpdate):
+    '''Updates an existing NAICS entry in the database based on its index.'''
+    update_fields = item.dict(exclude_unset=True)
+    if not update_fields:
+        raise HTTPException(status_code=400, detail='No fields to update.')
+
+    set_clauses = [f'{key} = ?' for key in update_fields.keys()]
+    params = list(update_fields.values())
+    params.append(item_index)
+    query = f"UPDATE naics SET {', '.join(set_clauses)} WHERE index = ?"
+
+    try:
+        with db_lock:
+            with closing(duckdb.connect(DB_FILE)) as con:
+                result = con.execute(query, params)
+                if result.fetchone()[0] == 0:
+                    raise HTTPException(status_code=404, detail=f'Item with index {item_index} not found.')
+    except duckdb.Error as e:
+        raise HTTPException(status_code=500, detail=f'Database update failed: {e}')
 
 @app.post('/api/shutdown')
-async def shutdown_server():
-    '''
-    Gracefully shuts down the application by closing the database
-    connection and then terminating the server process.
-    '''
-    print('Shutdown signal received. Closing database connection.')
-    con.close()
-    
-    # Get the process ID of the current process and send a terminate signal
-    pid = os.getpid()
-    print(f'Server process (PID: {pid}) is shutting down.')
-    os.kill(pid, signal.SIGTERM)
-    
+def shutdown_server():
+    '''Gracefully shuts down the Uvicorn server process.'''
+    print('Shutdown request received. Terminating server.')
+    SHUTDOWN_EVENT.set()
+    threading.Timer(1, _perform_shutdown).start()
     return {'message': 'Server is shutting down.'}
 
+def _perform_shutdown():
+    '''Sends an interrupt signal to the parent process to stop uvicorn --reload.'''
+    parent_pid = os.getppid()
+    os.kill(parent_pid, signal.SIGINT)
 
 # -------------------------------------------------------------------------------------------------
-# Mount the 'static' directory to serve index.html
+# Static Files Mount
 # -------------------------------------------------------------------------------------------------
 
-app.mount('/static', StaticFiles(directory='static'), name='static')
+app.mount('/', StaticFiles(directory='static', html=True), name='static')
 
-@app.get('/', response_class=HTMLResponse)
-async def read_root():
+# -------------------------------------------------------------------------------------------------
+# Main Execution Block
+# -------------------------------------------------------------------------------------------------
+
+if __name__ == '__main__':
     '''
-    Serves the main index.html file from the 'static' directory.
+    This block allows running the server directly with 'python main.py'
+    and handles the graceful shutdown mechanism.
     '''
-    with open('static/index.html') as f:
-        return HTMLResponse(content=f.read(), status_code=200)
+    config = uvicorn.Config('main:app', host='127.0.0.1', port=8000, reload=True)
+    server = uvicorn.Server(config)
+
+    server_thread = threading.Thread(target=server.run)
+    server_thread.start()
+
+    # Wait for the shutdown event to be set by the /api/shutdown endpoint
+    SHUTDOWN_EVENT.wait()
+    
+    # Gracefully stop the server
+    server.should_exit = True
+    server_thread.join()
+    print('Uvicorn server has stopped.')
 

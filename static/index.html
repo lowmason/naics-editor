@@ -111,8 +111,11 @@
         }
 
         function createContentHtml(text, placeholder) {
+            // Use textContent to prevent XSS issues
+            const tempDiv = document.createElement('div');
             if (text && text.trim() !== '') {
-                return text;
+                tempDiv.textContent = text;
+                return tempDiv.innerHTML;
             }
             return `<i class='text-gray-400 not-italic'>${placeholder}</i>`;
         }
@@ -249,9 +252,7 @@
             const field = element.dataset.field;
             const updatedData = { ...originalData, [field]: newValue };
             const index = originalData.index;
-
-            // Define card here to be accessible in both try and catch blocks
-            const card = element.closest('.bg-white');
+            const card = element.closest('.bg-white'); // Declare once at the top
 
             try {
                 const response = await fetch(`/api/data/${index}`, {
@@ -263,17 +264,16 @@
                 if (!response.ok) {
                     throw new Error(`Failed to save data. Server responded with ${response.status}`);
                 }
-                
-                // BUG FIX: Update all fields on the card to maintain data consistency.
+
+                console.log(`Successfully updated index ${index}`);
+
+                // If save is successful, update the local data attribute for all fields on this card
                 if (card) {
                     card.querySelectorAll('.clickable-edit').forEach(el => {
                         el.dataset.originalData = JSON.stringify(updatedData);
                     });
-                }
-
-                console.log(`Successfully updated index ${index}`);
-                // Visual feedback for success
-                if (card) {
+                    
+                    // Visual feedback for success
                     card.style.transition = 'background-color 0.5s';
                     card.style.backgroundColor = '#e0f2fe'; // light-blue
                     setTimeout(() => {
@@ -286,7 +286,7 @@
                 // Visual feedback for error
                 if (card) {
                     card.style.backgroundColor = '#fee2e2'; // light-red
-                    setTimeout(() => {
+                     setTimeout(() => {
                        card.style.backgroundColor = 'white';
                     }, 2000);
                 }
