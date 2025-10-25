@@ -1,66 +1,90 @@
-# -------------------------------------------------------------------------------------------------
-# Imports
-# -------------------------------------------------------------------------------------------------
-
-from pathlib import Path
-from dataclasses import dataclass
-
+import polars as pl
 import duckdb
 
+# Define file paths
+SOURCE_PARQUET = 'naics_descriptions.parquet'
+TITLES_PARQUET = 'naics_titles.parquet'
+FINAL_PARQUET = 'naics_descriptions_final.parquet'
+DB_PATH = 'naics_data.db'
 
-# -------------------------------------------------------------------------------------------------
-# Dataclass for Script Arguments
-# -------------------------------------------------------------------------------------------------
+print('--- Starting Data to DB Pipeline ---')
 
-@dataclass
-class Config:
+# --- Part 1: Final Data Preparation (unchanged) ---
+try:
+    print(f'Reading {SOURCE_PARQUET} and {TITLES_PARQUET}...')
+    # Load descriptions and titles
+    df_desc = pl.read_parquet(SOURCE_PARQUET)
+    df_titles = pl.read_parquet(TITLES_PARQUET)
 
-    '''Holds the configuration for the export script.'''
+    # Join descriptions with titles
+    df_final = df_titles.join(df_desc, on='code', how='left')
 
-    db_file: str = './naics_data.db'
+    # Add parent code and title information for hierarchy
+    df_final = df_final.with_columns(
+        pl.when(pl.col('code').str.n_chars() > 2)
+        .then(pl.col('code').str.slice(0, -1))
+        .otherwise(None)
+        .alias('parent_code')
+    ).join(
+        df_titles.rename({'title': 'parent_title', 'code': 'parent_code'}),
+        on='parent_code',
+        how='left'
+    )
 
-    output_file: str = 'naics_descriptions_final.parquet'
+    # Fill null descriptions with a placeholder
+    df_final = df_final.with_columns(
+        pl.col('description').fill_null('No description available.')
+    )
 
+    # Save final combined parquet
+    df_final.write_parquet(FINAL_PARQUET)
+    print(f'Successfully created {FINAL_PARQUET} with {df_final.height} rows.')
 
-# -------------------------------------------------------------------------------------------------
-# Main Export Function
-# -------------------------------------------------------------------------------------------------
+except Exception as e:
+    print(f'Error during data preparation: {e}')
+    exit()
 
-def export_to_parquet(db_file: str, output_file: str):
+# --- Part 2: Load to DuckDB ---
+try:
+    print(f'Connecting to DuckDB at {DB_PATH}...')
+    con = duckdb.connect(DB_PATH)
 
-    '''
-    Connects to the DuckDB database, reads the 'naics' table,
-    and exports it to a specified Parquet file.
-    '''
+    print('Creating main `naics` table...')
+    # Create the main table from the final parquet file
+    con.execute(f"""
+        DROP TABLE IF EXISTS naics;
+        CREATE TABLE naics AS
+        SELECT * FROM read_parquet('{FINAL_PARQUET}');
+    """)
 
-    if not Path(db_file).exists():
-        print(f"Error: Database file '{db_file}' not found.")
-    else:
-        print(f"Connecting to database '{db_file}'...")
+    print('Creating Full-Text Search (FTS) index...')
+    # Create FTS index
+    con.execute("PRAGMA create_fts_index('naics', 'code', 'title', 'description', overwrite=1);")
 
-    try:
+    # --- NEW: Create (or reset) the naics_edits table ---
+    print('Creating `naics_edits` table...')
+    con.execute("""
+        DROP TABLE IF EXISTS naics_edits;
+        CREATE TABLE naics_edits (
+            code TEXT PRIMARY KEY,
+            description TEXT
+        );
+    """)
+    print('All tables created successfully.')
 
-        with duckdb.connect(db_file, read_only=True) as con:
+    # Verify by showing tables
+    print('\nDatabase tables:')
+    con.execute("SHOW TABLES;").print()
 
-            print(f"Exporting data to '{output_file}'...")
-            
-            con.execute(f"COPY (SELECT * FROM naics ORDER BY index) TO '{output_file}' (FORMAT PARQUET);")
-            
-            print('Export completed successfully.')
-            
-    except Exception as e:
-        print(f'An error occurred during export: {e}')
+    print('\n`naics` table schema:')
+    con.execute("DESCRIBE naics;").print()
 
+    print('\n`naics_edits` table schema:')
+    con.execute("DESCRIBE naics_edits;").print()
 
-# -------------------------------------------------------------------------------------------------
-# Main Execution Block
-# -------------------------------------------------------------------------------------------------
+    con.close()
+    print('--- Database Pipeline Complete ---')
 
-if __name__ == '__main__':
-    
-    cfg = Config()
-    
-    # Simple manual parsing of sys.argv to override the default
-    
-    export_to_parquet(cfg.db_file, cfg.output_file)
-
+except Exception as e:
+    print(f'Error during database loading: {e}')
+    exit()
