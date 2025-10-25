@@ -133,7 +133,7 @@ class Config:
 # Import utility
 # -------------------------------------------------------------------------------------------------
 
-def read_naics_xlsx(
+def _read_naics_xlsx(
     url: str, 
     sheet: str, 
     schema: Dict[str, pl.DataType],
@@ -179,19 +179,30 @@ def read_naics_xlsx(
 
 
 # -------------------------------------------------------------------------------------------------
-# Main Entry Point
+# Input and preprocess NAICS data
 # -------------------------------------------------------------------------------------------------
 
-if __name__ == '__main__':
-    cfg = Config()
+def preprocess_naics_data(config: Config) -> None:
+
+    '''Preprocess and normalize NAICS data from U.S. Census Bureau Excel files.
+    
+    This function orchestrates the complete preprocessing pipeline for NAICS data, handling
+    downloading, cleaning, normalizing, and merging data from multiple source files. The
+    final output is a consolidated Parquet file containing NAICS codes, titles, descriptions,
+    exclusions, and examples.
+
+    Args:
+        config: Configuration object containing URLs, sheet names, schemas, and column mappings
+            for all NAICS data files.
+    '''
 
     # Load NAICS titles and normalize combined sector codes (31-33, 44-45, 48-49)
     naics_titles = (
-        read_naics_xlsx(
-            url=cfg.url_codes,
-            sheet=cfg.sheet_codes,
-            schema=cfg.schema_codes,
-            cols=cfg.rename_codes
+        _read_naics_xlsx(
+            url=config.url_codes,
+            sheet=config.sheet_codes,
+            schema=config.schema_codes,
+            cols=config.rename_codes
         )
         .with_columns(
             code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
@@ -226,11 +237,11 @@ if __name__ == '__main__':
 
     # Aggregate examples from index file by code
     naics_examples_1 = (
-        read_naics_xlsx(
-            url=cfg.url_index,
-            sheet=cfg.sheet_index,
-            schema=cfg.schema_index,
-            cols=cfg.rename_index
+        _read_naics_xlsx(
+            url=config.url_index,
+            sheet=config.sheet_index,
+            schema=config.schema_index,
+            cols=config.rename_index
         )
         .group_by('code', maintain_order=True)
         .agg(
@@ -243,11 +254,11 @@ if __name__ == '__main__':
 
     # Load descriptions and normalize combined sector codes
     naics_descriptions_1 = (
-        read_naics_xlsx(
-            url=cfg.url_descriptions,
-            sheet=cfg.sheet_descriptions,
-            schema=cfg.schema_descriptions, 
-            cols=cfg.rename_descriptions    
+        _read_naics_xlsx(
+            url=config.url_descriptions,
+            sheet=config.sheet_descriptions,
+            schema=config.schema_descriptions, 
+            cols=config.rename_descriptions    
         )
         .with_columns(
             code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
@@ -262,11 +273,11 @@ if __name__ == '__main__':
 
     # Load descriptions and normalize combined sector codes
     naics_exclusions_1 = (
-        read_naics_xlsx(
-            url=cfg.url_exclusions,
-            sheet=cfg.sheet_exclusions,
-            schema=cfg.schema_exclusions, 
-            cols=cfg.rename_exclusions    
+        _read_naics_xlsx(
+            url=config.url_exclusions,
+            sheet=config.sheet_exclusions,
+            schema=config.schema_exclusions, 
+            cols=config.rename_exclusions    
         )
         .with_columns(
             code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
@@ -719,4 +730,15 @@ if __name__ == '__main__':
     )
 
     print(f'{naics_final.height: ,} NAICS descriptions written to:')
-    print('  ./naics_descriptions.parquet')
+    print('  ./naics_descriptions.parquet') 
+
+
+# -------------------------------------------------------------------------------------------------
+# Main Entry Point
+# -------------------------------------------------------------------------------------------------
+
+if __name__ == '__main__':
+
+    cfg = Config()
+
+    preprocess_naics_data(cfg)
