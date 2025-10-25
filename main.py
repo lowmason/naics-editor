@@ -42,6 +42,10 @@ API Endpoints:
         - Partial updates supported (only provided fields are modified)
         - Returns 204 No Content on success
     
+    POST /api/export_and_shutdown: Export all data to naics_descriptions.parquet and shutdown
+        - Exports complete database to parquet file
+        - Triggers controlled shutdown sequence
+    
     POST /api/shutdown: Gracefully shut down the server
         - Triggers controlled shutdown sequence
         - Returns confirmation message
@@ -52,6 +56,7 @@ Web Interface:
     - Inline editing of NAICS fields (click any field to edit)
     - Visual feedback for save operations (success/error states)
     - Responsive design with Tailwind CSS
+    - "Edits Complete" button to export final data
     - Graceful server shutdown button
 
 Thread Safety:
@@ -79,7 +84,8 @@ Example Workflow:
     4. Click any field in a NAICS card to edit inline
     5. Changes save automatically when you click away (blur event)
     6. Visual feedback shows save success (blue flash) or error (red flash)
-    7. Click "Shutdown Server" when done to gracefully stop the application
+    7. Click "Edits Complete" when done to export data and shutdown
+    8. Or click "Shutdown Server" to shutdown without exporting
 
 Dependencies:
     - FastAPI: Web framework and API routing
@@ -384,6 +390,51 @@ def update_data(item_index: int, item: NaicsUpdate):
                     raise HTTPException(status_code=404, detail=f'Item with index {item_index} not found.')
     except duckdb.Error as e:
         raise HTTPException(status_code=500, detail=f'Database update failed: {e}')
+
+
+@app.post('/api/export_and_shutdown')
+def export_and_shutdown():
+
+    '''Export all NAICS data to parquet file and gracefully shut down the server.
+    
+    This endpoint performs the following actions:
+    1. Queries all data from the DuckDB database
+    2. Exports the data to naics_descriptions.parquet with the same schema as db_input.parquet
+    3. Triggers server shutdown sequence
+    
+    Returns:
+        Dict with export and shutdown confirmation message.
+    
+    Raises:
+        HTTPException: 500 error if export fails.
+    
+    Note:
+        This endpoint is called when the user clicks "Edits Complete" button,
+        signaling that all manual edits are finished and the final data should be saved.
+    '''
+
+    try:
+        print('Export and shutdown request received.')
+        
+        # Export all data from database to parquet
+        with db_lock:
+            with closing(duckdb.connect(DB_FILE, read_only=True)) as con:
+                df = con.execute('SELECT * FROM naics ORDER BY index').fetchdf()
+        
+        # Save to parquet file
+        df.to_parquet('naics_descriptions.parquet', index=False)
+        print(f'Successfully exported {len(df)} rows to naics_descriptions.parquet')
+        
+        # Trigger shutdown
+        print('Terminating server.')
+        SHUTDOWN_EVENT.set()
+        threading.Timer(1, _perform_shutdown).start()
+        
+        return {'message': 'Data exported successfully. Server is shutting down.'}
+        
+    except Exception as e:
+        print(f'Error during export: {e}')
+        raise HTTPException(status_code=500, detail=f'Failed to export data: {e}')
 
 
 @app.post('/api/shutdown')

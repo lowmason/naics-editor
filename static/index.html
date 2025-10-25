@@ -39,9 +39,14 @@
     <div class='container mx-auto p-4 md:p-8'>
         <header class='mb-6 flex flex-col sm:flex-row justify-between items-center'>
             <h1 class='text-3xl font-bold text-gray-800 mb-4 sm:mb-0'>NAICS Data Editor</h1>
-             <button id='shutdown-btn' class='bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-transform transform hover:scale-105'>
-                Shutdown Server
-            </button>
+            <div class='flex gap-3'>
+                <button id='export-btn' class='bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-transform transform hover:scale-105'>
+                    Edits Complete
+                </button>
+                <button id='shutdown-btn' class='bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-transform transform hover:scale-105'>
+                    Shutdown Server
+                </button>
+            </div>
         </header>
 
         <!-- Controls -->
@@ -72,6 +77,7 @@
         const searchInput = document.getElementById('search-input');
         const dataContainer = document.getElementById('data-container');
         const loadingIndicator = document.getElementById('loading');
+        const exportBtn = document.getElementById('export-btn');
         const shutdownBtn = document.getElementById('shutdown-btn');
 
         let debounceTimer;
@@ -189,14 +195,53 @@
             }
         });
         
-        // --- Shutdown Logic ---
+        // --- Export and Shutdown Logic ---
+        exportBtn.addEventListener('click', async () => {
+            if (confirm('Are you sure your edits are complete? This will export all data to naics_descriptions.parquet and shut down the server.')) {
+                try {
+                    exportBtn.disabled = true;
+                    exportBtn.textContent = 'Exporting...';
+                    exportBtn.classList.remove('hover:bg-green-700');
+                    exportBtn.classList.add('bg-green-700', 'cursor-not-allowed');
+                    
+                    await fetch('/api/export_and_shutdown', { method: 'POST' });
+                    
+                    document.body.innerHTML = `
+                        <div class='h-screen flex items-center justify-center bg-gray-100'>
+                             <div class='text-center bg-white p-8 rounded-lg shadow-lg'>
+                                 <svg class='w-16 h-16 text-green-500 mx-auto mb-4' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
+                                     <path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'></path>
+                                 </svg>
+                                 <h1 class='text-2xl font-bold text-gray-800 mb-2'>Data exported successfully!</h1>
+                                 <p class='text-gray-600 mb-2'>naics_descriptions.parquet has been saved.</p>
+                                 <p class='text-gray-600'>Server has been shut down. You can now safely close this browser tab.</p>
+                             </div>
+                        </div>`;
+                } catch (error) {
+                    // This error may occur if the server shuts down before sending a response
+                    console.warn('Server shut down before response could be received. This is expected.', error);
+                    document.body.innerHTML = `
+                        <div class='h-screen flex items-center justify-center bg-gray-100'>
+                             <div class='text-center bg-white p-8 rounded-lg shadow-lg'>
+                                 <svg class='w-16 h-16 text-green-500 mx-auto mb-4' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
+                                     <path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'></path>
+                                 </svg>
+                                 <h1 class='text-2xl font-bold text-gray-800 mb-2'>Data exported successfully!</h1>
+                                 <p class='text-gray-600 mb-2'>naics_descriptions.parquet has been saved.</p>
+                                 <p class='text-gray-600'>Server has been shut down. You can now safely close this browser tab.</p>
+                             </div>
+                        </div>`;
+                }
+            }
+        });
+        
         shutdownBtn.addEventListener('click', async () => {
-            if (confirm('Are you sure you want to shut down the server? This will stop the application.')) {
+            if (confirm('Are you sure you want to shut down the server? This will stop the application without exporting data.')) {
                 try {
                     await fetch('/api/shutdown', { method: 'POST' });
                     document.body.innerHTML = `
-                        <div class='h-screen flex items-center justify-center'>
-                             <div class='text-center'>
+                        <div class='h-screen flex items-center justify-center bg-gray-100'>
+                             <div class='text-center bg-white p-8 rounded-lg shadow-lg'>
                                  <h1 class='text-2xl font-bold text-gray-800'>Server has been shut down.</h1>
                                  <p class='text-gray-600'>You can now safely close this browser tab.</p>
                              </div>
@@ -205,8 +250,8 @@
                     // This error may occur if the server shuts down before sending a response
                     console.warn('Server shut down before response could be received. This is expected.', error);
                     document.body.innerHTML = `
-                        <div class='h-screen flex items-center justify-center'>
-                             <div class='text-center'>
+                        <div class='h-screen flex items-center justify-center bg-gray-100'>
+                             <div class='text-center bg-white p-8 rounded-lg shadow-lg'>
                                  <h1 class='text-2xl font-bold text-gray-800'>Server has been shut down.</h1>
                                  <p class='text-gray-600'>You can now safely close this browser tab.</p>
                              </div>
@@ -300,4 +345,3 @@
     </script>
 </body>
 </html>
-

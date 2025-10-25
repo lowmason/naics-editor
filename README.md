@@ -77,8 +77,6 @@ This project uses `uv`, a high-performance Python package manager.
      uv run python to_parquet.py
      ```
 
-   \***Note:** Running `to_parquet.py` will regenerate the entire database, including a new, empty `naics_edits` table. **This will erase all previous user edits.**
-
 5. **Run the FastAPI Server:**
 
    ```
@@ -86,7 +84,7 @@ This project uses `uv`, a high-performance Python package manager.
    ```
 
 6. **Open the Application:**
-   Navigate to `http://12_7.0.0.1:8000` in your web browser.
+   Navigate to `http://127.0.0.1:8000` in your web browser.
 
 ## API Endpoints
 
@@ -103,3 +101,7 @@ This project uses `uv`, a high-performance Python package manager.
 * `POST /update_description`: Saves an edit to the `naics_edits` table.
 
   * Body: `{ "code": "...", "description": "..." }`
+
+* `POST /api/export_and_shutdown`: Exports all data (with edits) to `naics_descriptions.parquet` and shuts down the server.
+
+* `POST /api/shutdown`: Shuts down the server without exporting.
