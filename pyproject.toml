@@ -2,6 +2,7 @@
 name = "naics-editor"
 version = "0.2.0"
 description = "FastAPI app to search and edit NAICS codes."
+requires-python = ">=3.12" 
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -10,6 +11,9 @@ dependencies = [
     "requests",
     "duckdb",
     "lancedb",
+    "fastexcel>=0.16.0",
+    "httpx>=0.28.1",
+    "pandas>=2.3.3",
 ]
 
 [tool.ruff]

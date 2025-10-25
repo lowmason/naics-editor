@@ -33,302 +33,690 @@ This script fetches the 2022 NAICS data, processes it, and saves the results as 
     - naics_descriptions.parquet: A file containing detailed descriptions for 1,012
       industry-level codes, with descriptions for 4-digit and 5-digit codes inferred
       from their children.
-
-This script requires the 'polars' and 'requests' libraries.
 '''
 
-import re
+
+# -------------------------------------------------------------------------------------------------
+# Imports
+# -------------------------------------------------------------------------------------------------
+
 import io
+from dataclasses import dataclass, field
+from typing import Dict
+
+import httpx
 import polars as pl
-import requests
 
-# Constants
-NAICS_YEAR = 2022
-BASE_URL = f'https://www.census.gov/naics/{NAICS_YEAR}/xls'
+# -------------------------------------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------------------------------------
 
-# File URLs for 2022 NAICS data
-URLS = {
-    'titles': f'{BASE_URL}/2-6%20digit_2022_Codes.xlsx',
-    'definitions': f'{BASE_URL}/2022%20NAICS%20Definitions.xlsx',
-}
+@dataclass
+class Config:
 
-# --- Part 1: Process NAICS Titles ---
-
-print('--- Part 1: Processing NAICS Titles ---')
-
-# Download and read NAICS titles
-try:
-    response = requests.get(URLS['titles'])
-    response.raise_for_status()
-    titles_file = io.BytesIO(response.content)
-
-    naics_titles_raw = pl.read_excel(
-        titles_file,
-        sheet_name='2-6 digit_2022_Codes',
-        read_options={
-            'skip_rows': 2,
-            'has_header': False,
-            'new_columns': ['code_raw', 'title', 'desc_len_raw', 'desc_len_2017', 'desc_len_2012']
-        }
-    )
-except Exception as e:
-    print(f"Failed to download or read NAICS titles from {URLS['titles']}: {e}")
-    exit()
-
-# Clean and normalize titles
-naics_titles = (
-    naics_titles_raw
-    .lazy()
-    .select(
-        pl.col('code_raw').alias('code'),
-        pl.col('title')
-    )
-    .drop_nulls('code')
-    .filter(
-        pl.col('code').cast(pl.String).str.contains(r'^\d+$', strict=True)
-    )
-    .with_columns(
-        pl.col('code').cast(pl.String)
-    )
-    .unique(subset=['code'], keep='first')
-    .collect()
-)
-
-print(f'Total NAICS titles processed: {naics_titles.height: ,}')
-print('Sample titles:')
-print(naics_titles.head())
-
-# Save titles to parquet
-naics_titles.write_parquet('naics_titles.parquet')
-print('Saved "naics_titles.parquet"\n')
-
-
-# --- Part 2: Process NAICS Descriptions ---
-
-print('--- Part 2: Processing NAICS Descriptions ---')
-
-# Download and read NAICS definitions
-try:
-    response = requests.get(URLS['definitions'])
-    response.raise_for_status()
-    definitions_file = io.BytesIO(response.content)
-
-    naics_desc_raw = pl.read_excel(
-        definitions_file,
-        sheet_name='2022 NAICS Definitions',
-        read_options={
-            'skip_rows': 2,
-            'has_header': False,
-            'new_columns': ['code1', 'code2', 'description_raw']
-        }
-    )
-except Exception as e:
-    print(f"Failed to download or read NAICS definitions from {URLS['definitions']}: {e}")
-    exit()
-
-# Helper function for text normalization
-def clean_text(text: str) -> str:
-    """Cleans and normalizes the description text."""
-    if not text:
-        return ''
+    '''Configuration for NAICS data sources and preprocessing pipeline.
     
-    # Remove specific artifacts and extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    text = re.sub(r'NAICS 2022', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'U\.S\.', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'CAN', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'MEX', '', text, flags=re.IGNORECASE)
+    This configuration specifies the URLs, sheet names, schemas, and column mappings for all
+    four NAICS data files from the U.S. Census Bureau. The configuration is carefully designed
+    to handle the specific structure and quirks of the official NAICS 2022 Excel files.
     
-    # Remove section headers
-    text = re.sub(r'Illustrative Examples:', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'Cross-References\.', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'Establishments primarily engaged in.*are classified in.*', '', text, flags=re.IGNORECASE)
+    Attributes:
+        url_codes: URL to Excel file containing NAICS codes and titles.
+        url_index: URL to Excel file containing index items (examples).
+        url_descriptions: URL to Excel file containing detailed industry descriptions.
+        url_exclusions: URL to Excel file containing cross-references (exclusions).
+
+        sheet_codes: Sheet name in codes file to read.
+        sheet_index: Sheet name in index file to read.
+        sheet_descriptions: Sheet name in descriptions file to read.
+        sheet_exclusions: Sheet name in exclusions file to read.
+        
+        schema_codes: Column schema for codes file (ensures proper data types).
+        schema_index: Column schema for index file (ensures proper data types).
+        schema_descriptions: Column schema for descriptions file (ensures proper data types).
+        schema_exclusions: Column schema for exclusions file (ensures proper data types).
+        
+        rename_codes: Column rename mapping for codes file (standardizes column names).
+        rename_index: Column rename mapping for index file (standardizes column names).
+        rename_descriptions: Column rename mapping for descriptions file (standardizes names).
+        rename_exclusions: Column rename mapping for exclusions file (standardizes names).
+    '''
+
+    url_codes: str = 'https://www.census.gov/naics/2022NAICS/2-6%20digit_2022_Codes.xlsx'
+    url_index: str = 'https://www.census.gov/naics/2022NAICS/2022_NAICS_Index_File.xlsx'
+    url_descriptions: str = 'https://www.census.gov/naics/2022NAICS/2022_NAICS_Descriptions.xlsx'
+    url_exclusions: str = 'https://www.census.gov/naics/2022NAICS/2022_NAICS_Cross_References.xlsx'
+
+    sheet_codes: str = 'tbl_2022_title_description_coun'
+    sheet_index: str = '2022NAICS'
+    sheet_descriptions: str = '2022_NAICS_Descriptions'
+    sheet_exclusions: str = '2022_NAICS_Cross_References'
+
+    schema_codes: Dict[str, pl.DataType] = field(default_factory=lambda: {
+        'Seq. No.': pl.UInt32,
+        '2022 NAICS US   Code': pl.Utf8, 
+        '2022 NAICS US Title': pl.Utf8
+    })
+    schema_index: Dict[str, pl.DataType] = field(default_factory=lambda: {
+        'NAICS22': pl.Utf8,
+        'INDEX ITEM DESCRIPTION': pl.Utf8
+    })
+    schema_descriptions: Dict[str, pl.DataType] = field(default_factory=lambda: {
+        'Code': pl.Utf8,
+        'Description': pl.Utf8
+    })
+    schema_exclusions: Dict[str, pl.DataType] = field(default_factory=lambda: {
+        'Code': pl.Utf8,
+        'Cross-Reference': pl.Utf8
+    })
+	
+    rename_codes: Dict[str, str] = field(default_factory=lambda: {
+        'Seq. No.': 'index',
+        '2022 NAICS US   Code': 'code', 
+        '2022 NAICS US Title': 'title'
+    })        
+    rename_index: Dict[str, str] = field(default_factory=lambda: {
+        'NAICS22': 'code',
+        'INDEX ITEM DESCRIPTION': 'examples_1'
+    })
+    rename_descriptions: Dict[str, str] = field(default_factory=lambda: {
+        'Code': 'code',
+        'Description': 'description'
+    })
+    rename_exclusions: Dict[str, str] = field(default_factory=lambda: {
+        'Code': 'code',
+        'Cross-Reference': 'excluded'
+    })
+
+
+# -------------------------------------------------------------------------------------------------
+# Import utility
+# -------------------------------------------------------------------------------------------------
+
+def read_naics_xlsx(
+    url: str, 
+    sheet: str, 
+    schema: Dict[str, pl.DataType],
+    cols: Dict[str, str]
+) -> pl.DataFrame:
     
-    # Normalize spacing again after removals
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    '''Download and read a NAICS Excel file from the U.S. Census Bureau.
+    
+    This utility function handles the complete workflow of downloading an Excel file via HTTP,
+    reading a specific sheet with controlled schema, and renaming columns to standardized names.
+    The function is designed to be called multiple times for different NAICS data files, each
+    with its own URL, sheet name, schema, and column mappings.
+    
+    Args:
+        url: Full URL to the Excel file on the Census Bureau website.
+        sheet: Name of the specific sheet to read from the Excel workbook.
+        schema: Dictionary mapping original column names to Polars data types. This ensures
+            proper type handling, especially for NAICS codes which must be strings.
+        cols: Dictionary mapping original column names to standardized names used throughout
+            the pipeline. This creates consistency across different source files.
+    
+    Returns:
+        Polars DataFrame with the specified columns read from the Excel sheet, renamed to
+        standardized column names, and with proper data types enforced.
+    '''
+    
+    resp = httpx.get(url)
+    resp.raise_for_status()
+    data = resp.content
 
-# Pre-process raw descriptions
-naics_desc_processed = (
-    naics_desc_raw
-    .lazy()
-    .with_columns(
-        # Forward-fill codes to associate descriptions with the correct code
-        pl.col('code1').forward_fill().alias('code'),
-        pl.col('description_raw').cast(pl.String).fill_null('').map_elements(clean_text).alias('description')
-    )
-    .filter(
-        pl.col('description') != ''
-    )
-    .group_by('code')
-    .agg(
-        # Concatenate all description parts for a given code
-        pl.col('description').str.concat(separator=' ').alias('description')
-    )
-    .with_columns(
-        # Handle combined sector codes like "31-33" by taking the first code "31"
-        pl.col('code').str.replace(r'(\d+)-\d+', '$1')
-    )
-    .collect()
-)
+    f = io.BytesIO(data)
 
-# Separate complete and missing descriptions
-naics_desc_complete_raw = (
-    naics_desc_processed
-    .filter(
-        pl.col('description').str.starts_with('This')
+    return (
+        pl
+        .read_excel(
+            f,
+            sheet_name=sheet,
+            columns=schema.keys(),
+            schema_overrides=schema
+        )
+        .rename(mapping=cols)
+    )  
+
+
+# -------------------------------------------------------------------------------------------------
+# Main Entry Point
+# -------------------------------------------------------------------------------------------------
+
+if __name__ == '__main__':
+    cfg = Config()
+
+    # Load NAICS titles and normalize combined sector codes (31-33, 44-45, 48-49)
+    naics_titles = (
+        read_naics_xlsx(
+            url=cfg.url_codes,
+            sheet=cfg.sheet_codes,
+            schema=cfg.schema_codes,
+            cols=cfg.rename_codes
+        )
+        .with_columns(
+            code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
+                .when(pl.col('code').eq('44-45')).then(pl.lit('44', pl.Utf8))
+                .when(pl.col('code').eq('48-49')).then(pl.lit('48', pl.Utf8))
+                .otherwise(pl.col('code'))
+        )
+        .select(
+            index=pl.col('index')
+                    .sub(1),
+            level=pl.col('code')
+                    .str.len_chars()
+                    .cast(pl.UInt8),
+            code=pl.col('code'),
+            title=pl.col('title')
+
+        )
     )
-)
 
-naics_desc_missing_raw = (
-    naics_desc_processed
-    .filter(
-        ~pl.col('description').str.starts_with('This')
+    naics_codes = set(
+        naics_titles
+        .get_column('code')
+        .unique()
+        .sort()
+        .to_list()
     )
-)
 
-print('Raw description processing:')
-print(f'  Total codes with some text: {naics_desc_processed.height: ,}')
-print(f'  Codes with full descriptions: {naics_desc_complete_raw.height: ,}')
-print(f'  Codes with missing/partial descriptions: {naics_desc_missing_raw.height: ,}')
 
-# --- Part 3: Infer Missing Descriptions ---
+    print(f'Number of 2-6-digit NAICS codes: {len(naics_codes): ,}')
+    print(f'Number of 2-6-digit NAICS titles: {naics_titles.height: ,}')
 
-print('\n--- Part 3: Inferring Missing Descriptions ---')
 
-# Isolate 6-digit codes (the most specific level) to infer parent descriptions
-naics_desc_6_digit = (
-    naics_desc_complete_raw
-    .filter(
-        pl.col('code').str.n_chars() == 6
+    # Aggregate examples from index file by code
+    naics_examples_1 = (
+        read_naics_xlsx(
+            url=cfg.url_index,
+            sheet=cfg.sheet_index,
+            schema=cfg.schema_index,
+            cols=cfg.rename_index
+        )
+        .group_by('code', maintain_order=True)
+        .agg(
+            examples_1=pl.col('examples_1')
+        )
     )
-    .with_columns(
-        pl.col('code').str.slice(0, 5).alias('code_5'),
-        pl.col('code').str.slice(0, 4).alias('code_4'),
-        pl.col('description')
-            .str.replace('This industry comprises', 'This industry group comprises', literal=True)
-            .str.replace('This industry consists of', 'This industry group consists of', literal=True)
-            .str.replace('This industry', 'This industry group', literal=True)
-    )
-)
 
-# Find 5-digit codes that are missing descriptions
-naics_desc_5_missing = (
-    naics_desc_missing_raw
-    .filter(pl.col('code').str.n_chars() == 5)
-    .select(pl.col('code').alias('code_5'))
-)
+    print(f'Number of 6-digit NAICS examples: {naics_examples_1.height: ,}')
 
-# Infer 5-digit descriptions from their 6-digit children
-naics_desc_5_complete = (
-    naics_desc_5_missing
-    .join(
-        naics_desc_6_digit,
-        on='code_5',
-        how='inner'
-    )
-    .group_by('code_5')
-    .agg(
-        pl.col('description').str.concat(separator=' ').alias('description')
-    )
-    .select(
-        pl.col('code_5').alias('code'),
-        pl.col('description')
-    )
-)
 
-# Find 4-digit codes that are missing descriptions
-naics_desc_4_missing = (
-    naics_desc_missing_raw
-    .filter(pl.col('code').str.n_chars() == 4)
-    .select(pl.col('code').alias('code_4'))
-)
-
-# Infer 4-digit descriptions from their 6-digit children
-naics_desc_4_complete_from_6 = (
-    naics_desc_4_missing
-    .join(
-        naics_desc_6_digit,
-        on='code_4',
-        how='inner'
+    # Load descriptions and normalize combined sector codes
+    naics_descriptions_1 = (
+        read_naics_xlsx(
+            url=cfg.url_descriptions,
+            sheet=cfg.sheet_descriptions,
+            schema=cfg.schema_descriptions, 
+            cols=cfg.rename_descriptions    
+        )
+        .with_columns(
+            code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
+                .when(pl.col('code').eq('44-45')).then(pl.lit('44', pl.Utf8))
+                .when(pl.col('code').eq('48-49')).then(pl.lit('48', pl.Utf8))
+                .otherwise(pl.col('code'))
+        )
+        .select('code', 'description')
     )
-    .group_by('code_4')
-    .agg(
-        pl.col('description').str.concat(separator=' ').alias('description')
+
+    print(f'Number of 2-6-digit NAICS descriptions: {naics_descriptions_1.height: ,}')
+
+    # Load descriptions and normalize combined sector codes
+    naics_exclusions_1 = (
+        read_naics_xlsx(
+            url=cfg.url_exclusions,
+            sheet=cfg.sheet_exclusions,
+            schema=cfg.schema_exclusions, 
+            cols=cfg.rename_exclusions    
+        )
+        .with_columns(
+            code=pl.when(pl.col('code').eq('31-33')).then(pl.lit('31', pl.Utf8))
+                .when(pl.col('code').eq('44-45')).then(pl.lit('44', pl.Utf8))
+                .when(pl.col('code').eq('48-49')).then(pl.lit('48', pl.Utf8))
+                .otherwise(pl.col('code'))
+        )
+        .group_by('code', maintain_order=True)
+        .agg(
+            excluded=pl.col('excluded')
+        )
+        .select(
+            code=pl.col('code'), 
+            excluded=pl.col('excluded')
+                    .list.join(' ')
+        )
     )
-    .select(
-        pl.col('code_4').alias('code'),
-        pl.col('description')
+
+    print(f'Number of 2-6-digit NAICS exclusions: {naics_exclusions_1.height: ,}')
+
+    # Split multiline descriptions and filter out section headers and cross-references
+    naics_descriptions_2 = (
+        naics_descriptions_1
+        .with_columns(
+            description=pl.col('description')
+                        .str.split('\r\n')
+                        .list.eval(
+                            pl.element()
+                                .filter(pl.element().str.len_chars() > 0)
+                        )
+        )
+        .explode('description')
+        .with_columns(
+            description_id=pl.col('description')
+                            .cum_count()
+                            .over('code')
+        )
+        .select('code', 'description_id', 'description')
+        .filter(
+            pl.col('description').ne('The Sector as a Whole'),
+            ~pl.col('description').str.contains('Cross-References.'),
+            pl.col('description').str.len_chars().gt(0)
+        )
     )
-)
 
-# Also infer from the newly completed 5-digit descriptions
-naics_desc_4_complete_from_5 = (
-    naics_desc_4_missing
-    .with_columns(
-        pl.col('code_4').alias('code_prefix')
+    # Clean and normalize description text
+    naics_descriptions_3 = (
+        naics_descriptions_2
+        .select(
+            code=pl.col('code')
+                    .str.strip_chars(),
+            description_id=pl.col('description_id'),
+            description=pl.col('description')
+                        .str.strip_prefix(' ')
+                        .str.strip_suffix(' ')
+                        .str.replace_all(r'NULL', '')
+                        .str.replace_all(r'See industry description for \d{6}\.', '')
+                        .str.replace_all(r'<.*?>', '')
+                        .str.replace_all(r'\xa0', ' ')
+                        .str.replace_all('.', '. ', literal=True)
+                        .str.replace_all('U. S. ', 'U.S.', literal=True)
+                        .str.replace_all('e. g. ,', 'e.g.,', literal=True)
+                        .str.replace_all('i. e. ,', 'i.e.,', literal=True)
+                        .str.replace_all(';', '; ', literal=True)
+                        .str.replace_all('31-33', '31', literal=True)
+                        .str.replace_all('44-45', '44', literal=True)
+                        .str.replace_all('48-49', '48', literal=True)
+                        .str.replace_all(r'\s{2,}', ' ')
+        )
+        .with_columns(
+            description=pl.when(pl.col('description').eq('')).then(None)
+                        .otherwise(pl.col('description'))
+        )
     )
-    .join(
-        naics_desc_5_complete.with_columns(
-            pl.col('code').str.slice(0, 4).alias('code_prefix')
-        ),
-        on='code_prefix',
-        how='inner'
+
+    print(f'Number of 2-6-digit NAICS: {naics_descriptions_3.height: ,}')
+
+
+    # Extract excluded activities (typically last description block for a code)
+    naics_exclusions_2 = (
+        naics_descriptions_3
+        .filter(
+            pl.col('description_id').max().over('code').eq(pl.col('description_id')),
+            pl.col('description').str.contains_any(['Excluded', 'excluded'])
+        )
+        .select(
+            code=pl.col('code')
+                    .str.strip_chars(),
+            description_id=pl.col('description_id'),
+            description=pl.col('description')
+        )
     )
-    .group_by('code_4')
-    .agg(
-        pl.col('description').str.concat(separator=' ').alias('description')
+
+    print(f'Number of 2-3-digit NAICS excluded: {naics_exclusions_2.height: ,}')
+    naics_exclusions_3 = (
+        naics_descriptions_3
+        .join(
+            naics_exclusions_2,
+            how='anti',
+            on='code'
+        )
+        .filter(
+            pl.col('code').str.len_chars().gt(2),
+            pl.col('description').is_not_null(),
+            pl.col('description').str.contains(r' \d{2, 6}')
+        )
+        .with_columns(
+            digit=pl.col('description')
+                    .str.extract_all(r' \d{2, 6}')
+                    .list.eval(pl.element().str.strip_prefix(' '))
+                    .list.set_intersection(naics_codes)
+                    .list.drop_nulls()
+        )
+        .filter(
+            pl.col('digit').list.len().gt(0)
+        )
     )
-    .select(
-        pl.col('code_4').alias('code'),
-        pl.col('description')
+
+    naics_exclusions_3_1 = (
+        naics_exclusions_3
+        .filter(
+            pl.col('digit').list.len().eq(1)
+        )
+        .explode('digit')
+        .filter(
+            ~pl.col('digit').str.contains(pl.col('code'))
+        )
+        .drop('digit')
     )
-)
 
-# Combine all inferred 4-digit descriptions
-naics_desc_4_complete = (
-    pl.concat([
-        naics_desc_4_complete_from_6,
-        naics_desc_4_complete_from_5
-    ])
-    .group_by('code')
-    .agg(
-        pl.col('description').str.concat(separator=' ').alias('description')
+    naics_exclusions_3_2 = (
+        naics_exclusions_3
+        .filter(
+            pl.col('digit').list.len().ne(1)
+        )
+        .drop('digit')
     )
-    .unique(subset=['code'])
-)
 
-# --- Part 4: Finalize and Combine Descriptions ---
-
-print('\n--- Part 4: Finalizing and Combining ---')
-
-# Get descriptions for 2/3-digit codes and 6-digit codes
-naics_desc_others_complete = (
-    naics_desc_complete_raw
-    .filter(
-        (pl.col('code').str.n_chars() != 4) &
-        (pl.col('code').str.n_chars() != 5)
+    naics_exclusions_4 = (
+        pl
+        .concat([
+            naics_exclusions_3_1,
+            naics_exclusions_3_2
+        ])
+        .filter(
+            ~pl.col('code').is_in(['525', '3152', '7132'])
+        )
     )
-)
 
-# Combine all complete descriptions (original, inferred 4-digit, inferred 5-digit)
-naics_descriptions = (
-    pl.concat([
-        naics_desc_others_complete,
-        naics_desc_4_complete,
-        naics_desc_5_complete
-    ])
-    .unique(subset=['code'], keep='first')
-    .sort('code')
-)
+    naics_exclusions_5 = (
+        pl
+        .concat([
+            naics_exclusions_2,
+            naics_exclusions_4
+        ])
+    )
 
-print('NAICS descriptions summary:')
-print(f'  Inferred 4-digit codes: {naics_desc_4_complete.height: ,}')
-print(f'  Inferred 5-digit codes: {naics_desc_5_complete.height: ,}')
-print(f'  Total complete descriptions: {naics_descriptions.height: ,}')
+    naics_exclusions_6 = (
+        naics_exclusions_5
+        .group_by('code', maintain_order=True)
+        .agg(
+            excluded=pl.col('description')
+        )
+        .with_columns(
+            excluded=pl.col('excluded')
+                    .list.join(' ')
+        )
+    )
 
-# Save descriptions to parquet
-naics_descriptions.write_parquet('naics_descriptions.parquet')
-print('Saved "naics_descriptions.parquet"\n')
+    print(f'Number of 2-3-digit NAICS excluded: {naics_exclusions_5.height: ,}')
 
-print('Data preprocessing complete.')
+    naics_exclusions = (
+        pl
+        .concat([
+            naics_exclusions_1,
+            naics_exclusions_6
+        ])
+    )
+
+    print(f'Number of all excluded: {naics_exclusions.height: ,}')
+
+    # Identify where 'Illustrative Examples:' section begins
+    naics_examples_2 = (
+        naics_descriptions_2
+        .filter(
+            pl.col('description')
+            .str.contains('Illustrative Examples:')
+        )
+        .select(
+            code=pl.col('code'),
+            example_id=pl.col('description_id')
+        )
+    )
+
+    # Extract examples that appear after 'Illustrative Examples:' marker
+    naics_examples_3 = (
+        naics_descriptions_3
+        .join(
+            naics_examples_2,
+            how='inner',
+            on='code'
+        )
+        .filter(
+            pl.col('example_id').lt(pl.col('description_id'))
+        )
+        .group_by('code', maintain_order=True)
+        .agg(
+            examples_2=pl.col('description')
+        )
+    )
+
+    # Merge index examples with illustrative examples, preferring illustrative
+    naics_examples = (
+        naics_examples_1
+        .join(
+            naics_examples_3,
+            how='full',
+            on='code',
+            coalesce=True
+        )
+        .select(
+            code=pl.col('code'),
+            examples=pl.coalesce(
+                'examples_2',
+                'examples_1'
+            )
+        )
+    )
+
+    print(f'Number of 2-6-digit NAICS examples: {naics_examples.height: ,}')
+
+    # Extract main descriptions, excluding examples and exclusions
+    naics_descriptions_4 = (
+        naics_descriptions_3
+        .join(
+            naics_examples_2,
+            how='left',
+            on='code'
+        )
+        .with_columns(
+            example_id=pl.col('example_id')
+                        .fill_null(9999)
+        )
+        .filter(
+            pl.col('example_id').gt(pl.col('description_id'))
+        )
+        .join(
+            naics_exclusions_5,
+            how='anti',
+            on=['code', 'description_id']
+        )
+        .group_by('code', maintain_order=True)
+        .agg(
+            pl.col('description')
+        )
+        .with_columns(
+            description=pl.col('description')
+                        .list.join(' ')
+        )
+    )
+
+    print(f'Number of 2-6-digit NAICS descriptions: {naics_descriptions_4.height: ,}')
+
+    # Separate complete descriptions from missing ones
+    naics_desc_complete_1 = (
+        naics_descriptions_4
+        .filter(
+            pl.col('description').ne('')
+        )    
+    )
+
+    # Find 4-digit codes missing descriptions
+    naics_desc_4_missing = (
+        naics_descriptions_4
+        .filter(
+            pl.col('code').str.len_chars().eq(4),
+            pl.col('description').eq('')
+        )
+        .select(
+            code1=pl.col('code')
+                    .str.pad_end(5, '1'),
+            code2=pl.col('code')
+                    .str.pad_end(5, '2'),
+            code3=pl.col('code')
+                    .str.pad_end(5, '3'),
+            code4=pl.col('code')
+                    .str.pad_end(5, '4'),
+            code9=pl.col('code')
+                    .str.pad_end(5, '9')
+        )
+    )
+
+    # Find 5-digit codes missing descriptions
+    naics_desc_5_missing = (
+        naics_descriptions_4
+        .filter(
+            pl.col('code').str.len_chars().eq(5),
+            pl.col('description').eq('')
+        )
+        .select(
+            code=pl.col('code')
+                    .str.pad_end(6, '0')
+        )
+    )
+
+    print('NAICS descriptions:')
+    print(f'  Total: {naics_descriptions_4.height: ,}')
+    print(f'  Complete: {naics_desc_complete_1.height: ,}')
+    print(f'  Missing (level 4): {naics_desc_4_missing.height: ,}')
+    print(f'  Missing (level 5): {naics_desc_5_missing.height: ,}')
+
+    # Fill missing 5-digit descriptions from 6-digit children
+    naics_desc_5_complete = (
+        naics_desc_5_missing
+        .join(
+            naics_desc_complete_1,
+            how='inner',
+            on='code'
+        )
+        .with_columns(
+            code=pl.col('code')
+                    .str.slice(0, 5)
+        )
+        .select(
+            code=pl.col('code'), 
+            description=pl.col('description')
+                        .str.replace('This industry', 'This NAICS industry', literal=True)
+        )
+    )
+
+    naics_desc_complete_2 = (
+        pl
+        .concat([
+            naics_desc_complete_1,
+            naics_desc_5_complete
+        ])
+    )
+
+    # Fill missing 4-digit descriptions from 5-digit children (try multiple suffixes)
+    naics_desc_4_complete_1 = (
+        naics_desc_4_missing
+        .join(
+            naics_desc_complete_2,
+            how='inner',
+            right_on='code',
+            left_on='code1'
+        )
+    )
+
+    naics_desc_4_complete_2 = (
+        naics_desc_4_missing
+        .join(
+            naics_desc_complete_2,
+            how='inner',
+            right_on='code',
+            left_on='code2'
+        )
+    )
+
+    naics_desc_4_complete_3 = (
+        naics_desc_4_missing
+        .join(
+            naics_desc_complete_2,
+            how='inner',
+            right_on='code',
+            left_on='code3'
+        )
+    )
+
+    naics_desc_4_complete_4 = (
+        naics_desc_4_missing
+        .join(
+            naics_desc_complete_2,
+            how='inner',
+            right_on='code',
+            left_on='code4'
+        )
+    )
+
+    naics_desc_4_complete_9 = (
+        naics_desc_4_missing
+        .join(
+            naics_desc_complete_2,
+            how='inner',
+            right_on='code',
+            left_on='code9'
+        )
+    )
+
+    naics_desc_4_complete = (
+        pl
+        .concat([
+            naics_desc_4_complete_1,
+            naics_desc_4_complete_2,
+            naics_desc_4_complete_3,
+            naics_desc_4_complete_4,
+            naics_desc_4_complete_9
+        ])
+        .select(
+            code=pl.col('code1')
+                .str.slice(0, 4), 
+            description=pl.col('description')
+                        .str.replace('This industry', 'This industry group', literal=True)
+                        .str.replace('This NAICS industry', 'This industry group', literal=True)
+        )
+        .unique(subset=['code'])
+    )
+
+    # Combine all descriptions
+    naics_descriptions = (
+        pl
+        .concat([
+            naics_desc_complete_2,
+            naics_desc_4_complete
+        ])
+    )
+
+    print('NAICS descriptions:')
+    print(f'  Missing (level 4): {naics_desc_4_missing.height: ,}')
+    print(f'  Filled missing (level 4): {naics_desc_4_complete.height: ,}')
+    print(f'  Missing (level 5): {naics_desc_5_missing.height: ,}')
+    print(f'  Filled missing (level 5): {naics_desc_5_complete.height: ,}')
+    print(f'  Complete: {naics_descriptions.height: ,}\n')
+
+    # Join all components and write final output
+    naics_final = (
+        naics_titles
+        .join(
+            naics_descriptions,
+            how='left',
+            on='code'
+        )
+        .join(
+            naics_exclusions,
+            how='left',
+            on='code'
+        )
+        .join(
+            naics_examples,
+            how='left',
+            on='code'
+        )
+    )
+
+    (
+        naics_final
+        .write_parquet(
+            './naics_descriptions.parquet'
+        )
+    )
+
+    print(f'{naics_final.height: ,} NAICS descriptions written to:')
+    print('  ./naics_descriptions.parquet')
