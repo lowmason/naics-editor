@@ -114,7 +114,7 @@ from preprocess_data import Config, preprocess_naics_data
 
 db_lock = threading.Lock()
 DB_FILE = 'naics_data.db'
-PARQUET_FILE = 'naics_descriptions.parquet'
+PARQUET_FILE = 'db_input.parquet'
 SHUTDOWN_EVENT = threading.Event()
 
 
@@ -134,6 +134,7 @@ class NaicsEntry(BaseModel):
         description: Detailed description of the industry classification.
         excluded: Activities explicitly excluded from this classification.
         examples: Illustrative examples of businesses in this classification.
+
     '''
     
     index: int
@@ -146,7 +147,7 @@ class NaicsEntry(BaseModel):
 
 
 class NaicsUpdate(BaseModel):
-    
+
     '''Represents the data structure for updating a NAICS entry.
     
     All fields are optional to allow partial updates of NAICS entries.
@@ -159,7 +160,7 @@ class NaicsUpdate(BaseModel):
         excluded: Activities explicitly excluded from this classification.
         examples: Illustrative examples of businesses in this classification.
     '''
-    
+
     level: int | None = Field(None)
     code: str | None = Field(None)
     title: str | None = Field(None)
@@ -190,6 +191,7 @@ def startup_event():
        to download and prepare NAICS data from the U.S. Census Bureau.
     2. Checks if the database file exists; if not, creates the table structure.
     3. Loads the initial data from the parquet file into the database.
+    4. Deletes the parquet file after successful database creation to save disk space.
     
     The database uses DuckDB with the following schema:
     - index: Primary key (UBIGINT)
@@ -206,10 +208,8 @@ def startup_event():
 
     # Check if parquet file exists; if not, run preprocessing
     if not os.path.exists(PARQUET_FILE):
-
         print(f"Parquet file '{PARQUET_FILE}' not found.")
         print("Running preprocessing to download and prepare NAICS data...")
-
         try:
             config = Config()
             preprocess_naics_data(config)
@@ -222,7 +222,6 @@ def startup_event():
     db_file_exists = os.path.exists(DB_FILE)
     with db_lock:
         with closing(duckdb.connect(DB_FILE)) as con:
-
             print(f'Connected to database: {DB_FILE}')
 
             if not db_file_exists:
@@ -244,6 +243,9 @@ def startup_event():
                         con.register('df_view', df)
                         con.execute('INSERT INTO naics SELECT * FROM df_view')
                         print(f'Successfully loaded {len(df)} rows from {PARQUET_FILE}.')
+                        # Delete the parquet file after successful database creation
+                        os.remove(PARQUET_FILE)
+                        print(f'Deleted temporary file: {PARQUET_FILE}')
                     else:
                         print(f"Warning: '{PARQUET_FILE}' not found. Database will be empty.")
                 except Exception as e:
@@ -257,7 +259,7 @@ def startup_event():
 
 @app.on_event('shutdown')
 def shutdown_event():
-
+    
     '''Perform cleanup operations on application shutdown.
     
     Currently logs shutdown status. Can be extended for resource cleanup
@@ -265,7 +267,6 @@ def shutdown_event():
     '''
 
     print('FastAPI application is shutting down.')
-
 
 # -------------------------------------------------------------------------------------------------
 # API Endpoints
@@ -328,17 +329,15 @@ def get_data(level: int = None, code: str = None, search: str = None):
             with closing(duckdb.connect(DB_FILE, read_only=True)) as con:
                 results = con.execute(base_query, params).fetchdf()
         return results.to_dict('records')
-    
     except duckdb.Error as e:
         raise HTTPException(status_code=500, detail=f'Database query failed: {e}')
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'An unexpected error occurred: {e}')
 
 
 @app.put('/api/data/{item_index}', status_code=204)
 def update_data(item_index: int, item: NaicsUpdate):
-
+ 
     '''Update an existing NAICS entry in the database.
     
     Performs a partial update of the NAICS entry identified by its index.
@@ -367,7 +366,7 @@ def update_data(item_index: int, item: NaicsUpdate):
         }
         ```
     '''
-
+ 
     update_fields = item.dict(exclude_unset=True)
     if not update_fields:
         raise HTTPException(status_code=400, detail='No fields to update.')
@@ -383,7 +382,6 @@ def update_data(item_index: int, item: NaicsUpdate):
                 result = con.execute(query, params)
                 if result.fetchone()[0] == 0:
                     raise HTTPException(status_code=404, detail=f'Item with index {item_index} not found.')
-                
     except duckdb.Error as e:
         raise HTTPException(status_code=500, detail=f'Database update failed: {e}')
 
@@ -406,18 +404,19 @@ def shutdown_server():
         The parent process (reload watcher) will be terminated, stopping
         the entire application gracefully.
     '''
-    
+
     print('Shutdown request received. Terminating server.')
     SHUTDOWN_EVENT.set()
     threading.Timer(1, _perform_shutdown).start()
     return {'message': 'Server is shutting down.'}
 
 
-# Send interrupt signal to parent process to stop uvicorn
+# Send SIGINT to parent process to stop uvicorn
 def _perform_shutdown():
     
     parent_pid = os.getppid()
     os.kill(parent_pid, signal.SIGINT)
+
 
 # -------------------------------------------------------------------------------------------------
 # Static Files Mount
@@ -425,11 +424,13 @@ def _perform_shutdown():
 
 app.mount('/', StaticFiles(directory='static', html=True), name='static')
 
+
 # -------------------------------------------------------------------------------------------------
 # Main Execution Block
 # -------------------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
+
     '''Run the FastAPI server with Uvicorn in reload mode.
     
     This block handles direct execution via 'python main.py' and implements
@@ -442,6 +443,7 @@ if __name__ == '__main__':
     
     The server is accessible at http://127.0.0.1:8000 after startup.
     '''
+
     config = uvicorn.Config('main:app', host='127.0.0.1', port=8000, reload=True)
     server = uvicorn.Server(config)
 

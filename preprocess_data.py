@@ -30,7 +30,7 @@ Why Preprocessing is Necessary:
 
 This script fetches the 2022 NAICS data, processes it, and saves the results as two main files:
     - naics_titles.parquet: A file containing all 32,878 NAICS codes and their official titles.
-    - naics_descriptions.parquet: A file containing detailed descriptions for 1,012
+    - db_input.parquet: A file containing detailed descriptions for 1,012
       industry-level codes, with descriptions for 4-digit and 5-digit codes inferred
       from their children.
 '''
@@ -725,12 +725,12 @@ def preprocess_naics_data(config: Config) -> None:
     (
         naics_final
         .write_parquet(
-            './naics_descriptions.parquet'
+            './db_input.parquet'
         )
     )
 
     print(f'{naics_final.height: ,} NAICS descriptions written to:')
-    print('  ./naics_descriptions.parquet') 
+    print('  ./db_input.parquet') 
 
 
 # -------------------------------------------------------------------------------------------------
